@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PDF Proofreading App - Auto Save</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none; 
+            -webkit-touch-callout: none; 
+            overscroll-behavior-y: none;
+        }
+        .toolbar {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            width: 100%;
+            max-width: 1100px;
+        }
+        .tool-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            border-right: 1px solid #ccc;
+            padding-right: 15px;
+        }
+        .tool-group:last-child {
+            border-right: none;
+        }
+        button {
+            padding: 8px 12px;
+            cursor: pointer;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #f9f9f9;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #e0e0e0;
+        }
+        button:disabled {
+            background: #eee;
+            color: #999;
+            cursor: not-allowed;
+            border-color: #ddd;
+        }
+        button.active {
+            background: #d0d0d0;
+            border-color: #555;
+            font-weight: bold;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .export-btn {
+            background: #28a745;
+            color: white;
+            border-color: #218838;
+            font-weight: bold;
+        }
+        .export-btn:hover {
+            background: #218838;
+        }
+        .color-btn {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            padding: 0;
+        }
+        .color-btn.active {
+            border-color: #333;
+            transform: scale(1.1);
+        }
+        .page-info {
+            font-weight: bold;
+            min-width: 80px;
+            text-align: center;
+        }
+        .canvas-container {
+            position: relative;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            background: white;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+        #pdf-canvas, #draw-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+        #draw-canvas {
+            z-index: 10;
+            cursor: crosshair;
+            touch-action: none; 
+            outline: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="toolbar">
+        <div class="tool-group">
+            <input type="file" id="pdf-upload" accept="application/pdf">
+        </div>
+
+        <div class="tool-group">
+            <button id="btn-prev" disabled>◀</button>
+            <span class="page-info" id="page-info">หน้า - / -</span>
+            <button id="btn-next" disabled>▶</button>
+        </div>
+
+        <div class="tool-group">
+            <button class="tool-mode-btn active" data-tool="pen">✏️ วาดอิสระ</button>
+            <button class="tool-mode-btn" data-tool="ruler">📏 เส้นตรง</button>
+            <button class="tool-mode-btn" data-tool="lasso">➰ ลบวงล้อม</button>
+        </div>
+        
+        <div class="tool-group">
+            <button class="color-btn active" style="background-color: #000000;" data-color="#000000" title="ดำ"></button>
+            <button class="color-btn" style="background-color: #dc3545;" data-color="#dc3545" title="แดง"></button>
+            <button class="color-btn" style="background-color: #007bff;" data-color="#007bff" title="น้ำเงิน"></button>
+            <button class="color-btn" style="background-color: #28a745;" data-color="#28a745" title="เขียว"></button>
+            <button class="color-btn" style="background-color: #6f42c1;" data-color="#6f42c1" title="ม่วง"></button>
+            <button class="color-btn" style="background-color: #ffc107;" data-color="#ffc107" title="เหลือง"></button>
+        </div>
+
+        <div class="tool-group">
+            <button class="size-btn active" data-size="1">S</button>
+            <button class="size-btn" data-size="2.5">M</button>
+            <button class="size-btn" data-size="5">L</button>
+        </div>
+
+        <div class="tool-group">
+            <button id="btn-clear" title="ล้างเส้นหน้านี้">ล้าง</button>
+            <button id="btn-save" title="บันทึกข้อมูลเผื่อสูญหาย">💾 บันทึก</button>
+            <button id="btn-load" title="โหลดข้อมูลที่เคยบันทึกไว้">📂 โหลด</button>
+            <button id="btn-export" class="export-btn">📥 Export</button>
+        </div>
+    </div>
+
+    <div class="canvas-container" id="container">
+        <canvas id="pdf-canvas"></canvas>
+        <canvas id="draw-canvas"></canvas>
+    </div>
+
+    <script>
+        document.addEventListener('contextmenu', event => event.preventDefault());
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        const pdfUpload = document.getElementById('pdf-upload');
+        const pdfCanvas = document.getElementById('pdf-canvas');
+        const drawCanvas = document.getElementById('draw-canvas');
+        const container = document.getElementById('container');
+        const pageInfo = document.getElementById('page-info');
+        const btnPrev = document.getElementById('btn-prev');
+        const btnNext = document.getElementById('btn-next');
+        const btnExport = document.getElementById('btn-export');
+        const btnSave = document.getElementById('btn-save');
+        const btnLoad = document.getElementById('btn-load');
+        
+        const pdfCtx = pdfCanvas.getContext('2d');
+        const drawCtx = drawCanvas.getContext('2d');
+
+        let currentPdf = null;
+        let originalPdfBytes = null; 
+        let currentFileName = ''; // ตัวแปรเก็บชื่อไฟล์สำหรับผูกระบบเซฟ
+        let currentPageNum = 1;
+        let totalPages = 0;
+        
+        let isDrawing = false;
+        let currentMode = 'pen'; 
+        let currentColor = '#000000';
+        let currentSize = 1; 
+        
+        let allStrokes = {}; 
+        let currentStroke = null;
+        let startPos = null;
+        let lassoPath = [];
+
+        function hexToRgbObj(hex) {
+            let r = 0; let g = 0; let b = 0;
+            if (hex.length === 7) {
+                r = parseInt(hex.substring(1, 3), 16) / 255;
+                g = parseInt(hex.substring(3, 5), 16) / 255;
+                b = parseInt(hex.substring(5, 7), 16) / 255;
+            }
+            return { r, g, b };
+        }
+
+        function isPointInPolygon(point, vs) {
+            let x = point.x, y = point.y;
+            let inside = false;
+            for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
+                let xi = vs[i].x, yi = vs[i].y;
+                let xj = vs[j].x, yj = vs[j].y;
+                let intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        pdfUpload.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file || file.type !== 'application/pdf') return;
+
+            currentFileName = file.name; // จำชื่อไฟล์ไว้เพื่อแยกระบบเซฟ
+
+            const fileReader = new FileReader();
+            fileReader.onload = function() {
+                originalPdfBytes = new Uint8Array(this.result); 
+                
+                pdfjsLib.getDocument(originalPdfBytes).promise.then(pdf => {
+                    currentPdf = pdf;
+                    totalPages = pdf.numPages;
+                    currentPageNum = 1; 
+                    allStrokes = {}; 
+
+                    // โหลดข้อมูลอัตโนมัติถ้าเคยมีไฟล์นี้เซฟไว้
+                    const savedData = localStorage.getItem('pdfDraft_' + currentFileName);
+                    if (savedData) {
+                        allStrokes = JSON.parse(savedData);
+                    }
+
+                    renderPage(currentPageNum);
+                });
+            };
+            fileReader.readAsArrayBuffer(file);
+        });
+
+        function renderPage(pageNum) {
+            currentPdf.getPage(pageNum).then(page => {
+                const viewport = page.getViewport({ scale: 1.5 });
+                const dpr = window.devicePixelRatio || 1;
+                
+                pdfCanvas.width = viewport.width * dpr;
+                pdfCanvas.height = viewport.height * dpr;
+                drawCanvas.width = viewport.width * dpr;
+                drawCanvas.height = viewport.height * dpr;
+
+                pdfCanvas.style.width = viewport.width + 'px';
+                pdfCanvas.style.height = viewport.height + 'px';
+                drawCanvas.style.width = viewport.width + 'px';
+                drawCanvas.style.height = viewport.height + 'px';
+                
+                container.style.width = viewport.width + 'px';
+                container.style.height = viewport.height + 'px';
+
+                const renderContext = {
+                    canvasContext: pdfCtx,
+                    transform: [dpr, 0, 0, dpr, 0, 0], 
+                    viewport: viewport
+                };
+                page.render(renderContext);
+                
+                drawCtx.scale(dpr, dpr);
+                drawCtx.lineCap = 'round';
+                drawCtx.lineJoin = 'round';
+
+                pageInfo.textContent = `หน้า ${pageNum} / ${totalPages}`;
+                btnPrev.disabled = pageNum <= 1;
+                btnNext.disabled = pageNum >= totalPages;
+
+                redrawAllStrokes(pageNum);
+            });
+        }
+
+        btnPrev.addEventListener('click', () => {
+            if (currentPageNum <= 1) return;
+            currentPageNum--;
+            renderPage(currentPageNum);
+        });
+
+        btnNext.addEventListener('click', () => {
+            if (currentPageNum >= totalPages) return;
+            currentPageNum++;
+            renderPage(currentPageNum);
+        });
+
+        document.querySelectorAll('.tool-mode-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.tool-mode-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentMode = e.target.getAttribute('data-tool');
+            });
+        });
+
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentColor = e.target.getAttribute('data-color');
+            });
+        });
+
+        document.querySelectorAll('.size-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentSize = parseFloat(e.target.getAttribute('data-size')); 
+            });
+        });
+
+        function getPointerPos(canvas, evt) {
+            const rect = canvas.getBoundingClientRect();
+            return {
+                x: evt.clientX - rect.left,
+                y: evt.clientY - rect.top
+            };
+        }
+
+        drawCanvas.addEventListener('dblclick', function(e) {
+            e.preventDefault();
+        });
+
+        drawCanvas.addEventListener('pointerdown', (e) => {
+            if (!currentPdf) return; 
+            if (e.pointerType === 'touch') return;
+            
+            drawCanvas.setPointerCapture(e.pointerId);
+            isDrawing = true;
+            startPos = getPointerPos(drawCanvas, e);
+            
+            if (currentMode === 'pen') {
+                currentStroke = {
+                    color: currentColor,
+                    size: currentSize,
+                    points: [{ x: startPos.x, y: startPos.y }]
+                };
+                
+                drawCtx.beginPath();
+                drawCtx.moveTo(startPos.x, startPos.y);
+                drawCtx.fillStyle = currentColor;
+                drawCtx.arc(startPos.x, startPos.y, currentSize / 2, 0, Math.PI * 2);
+                drawCtx.fill();
+                drawCtx.beginPath();
+                drawCtx.moveTo(startPos.x, startPos.y);
+            } else if (currentMode === 'lasso') {
+                lassoPath = [{ x: startPos.x, y: startPos.y }];
+            }
+        });
+
+        drawCanvas.addEventListener('pointermove', (e) => {
+            if (e.pointerType === 'touch') return;
+            if (!isDrawing) return;
+            e.preventDefault(); 
+            
+            const currentPos = getPointerPos(drawCanvas, e);
+            
+            if (currentMode === 'pen') {
+                drawCtx.strokeStyle = currentColor;
+                drawCtx.lineWidth = currentSize;
+                drawCtx.lineTo(currentPos.x, currentPos.y);
+                drawCtx.stroke();
+                currentStroke.points.push({ x: currentPos.x, y: currentPos.y });
+                
+            } else if (currentMode === 'ruler') {
+                redrawAllStrokes(currentPageNum);
+                drawCtx.beginPath();
+                drawCtx.strokeStyle = currentColor;
+                drawCtx.lineWidth = currentSize;
+                drawCtx.moveTo(startPos.x, startPos.y);
+                drawCtx.lineTo(currentPos.x, currentPos.y);
+                drawCtx.stroke();
+                
+            } else if (currentMode === 'lasso') {
+                lassoPath.push({ x: currentPos.x, y: currentPos.y });
+                redrawAllStrokes(currentPageNum);
+            }
+        });
+
+        function saveStroke(e) {
+            if (e.pointerType === 'touch') return;
+            
+            if (isDrawing) {
+                isDrawing = false;
+                drawCanvas.releasePointerCapture(e.pointerId);
+                const currentPos = getPointerPos(drawCanvas, e);
+                
+                if (!allStrokes[currentPageNum]) {
+                    allStrokes[currentPageNum] = [];
+                }
+
+                if (currentMode === 'pen') {
+                    allStrokes[currentPageNum].push(currentStroke);
+                } else if (currentMode === 'ruler') {
+                    allStrokes[currentPageNum].push({
+                        color: currentColor,
+                        size: currentSize,
+                        points: [
+                            { x: startPos.x, y: startPos.y },
+                            { x: currentPos.x, y: currentPos.y }
+                        ]
+                    });
+                } else if (currentMode === 'lasso') {
+                    if (lassoPath.length > 2) {
+                        const currentStrokes = allStrokes[currentPageNum] || [];
+                        allStrokes[currentPageNum] = currentStrokes.filter(stroke => {
+                            const isInside = stroke.points.some(p => isPointInPolygon(p, lassoPath));
+                            return !isInside; 
+                        });
+                    }
+                    lassoPath = []; 
+                }
+                
+                redrawAllStrokes(currentPageNum);
+
+                // ระบบ Auto-Save ซ่อนการทำงานอยู่เบื้องหลังทุกครั้งที่ลากเส้นเสร็จ
+                if (currentFileName) {
+                    localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+                }
+            }
+        }
+
+        drawCanvas.addEventListener('pointerup', saveStroke);
+        drawCanvas.addEventListener('pointercancel', saveStroke);
+
+        function redrawAllStrokes(pageNum) {
+            const dpr = window.devicePixelRatio || 1;
+            drawCtx.clearRect(0, 0, drawCanvas.width / dpr, drawCanvas.height / dpr);
+            
+            const strokesForPage = allStrokes[pageNum] || [];
+            
+            strokesForPage.forEach(stroke => {
+                drawCtx.beginPath();
+                drawCtx.strokeStyle = stroke.color;
+                drawCtx.lineWidth = stroke.size;
+                
+                stroke.points.forEach((point, index) => {
+                    if (index === 0) {
+                        drawCtx.moveTo(point.x, point.y);
+                    } else {
+                        drawCtx.lineTo(point.x, point.y);
+                    }
+                });
+                drawCtx.stroke();
+            });
+
+            if (currentMode === 'lasso' && isDrawing && lassoPath.length > 0) {
+                drawCtx.beginPath();
+                drawCtx.strokeStyle = 'rgba(0, 122, 255, 0.8)';
+                drawCtx.fillStyle = 'rgba(0, 122, 255, 0.2)';
+                drawCtx.setLineDash([5, 5]); 
+                drawCtx.lineWidth = 1;
+                drawCtx.moveTo(lassoPath[0].x, lassoPath[0].y);
+                for(let i = 1; i < lassoPath.length; i++) {
+                    drawCtx.lineTo(lassoPath[i].x, lassoPath[i].y);
+                }
+                drawCtx.closePath();
+                drawCtx.fill();
+                drawCtx.stroke();
+                drawCtx.setLineDash([]); 
+            }
+        }
+
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            if (!currentPdf) return;
+            allStrokes[currentPageNum] = []; 
+            redrawAllStrokes(currentPageNum);
+            // ลบแล้วอัปเดต Auto-Save ด้วย
+            if (currentFileName) {
+                localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+            }
+        });
+
+        // ปุ่มเซฟแบบกดเอง
+        btnSave.addEventListener('click', () => {
+            if (!currentPdf) {
+                alert('กรุณาเปิดไฟล์ PDF ก่อนบันทึก');
+                return;
+            }
+            localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+            alert('บันทึกฉบับร่างของไฟล์ "' + currentFileName + '" เรียบร้อยแล้ว');
+        });
+
+        // ปุ่มโหลดแบบกดเอง
+        btnLoad.addEventListener('click', () => {
+            if (!currentPdf) {
+                alert('กรุณาเปิดไฟล์ PDF ก่อนโหลดข้อมูล');
+                return;
+            }
+            const savedData = localStorage.getItem('pdfDraft_' + currentFileName);
+            if (savedData) {
+                allStrokes = JSON.parse(savedData);
+                redrawAllStrokes(currentPageNum);
+                alert('โหลดข้อมูลเรียบร้อยแล้ว');
+            } else {
+                alert('ไม่พบข้อมูลร่างสำหรับไฟล์นี้');
+            }
+        });
+
+        btnExport.addEventListener('click', async () => {
+            if (!originalPdfBytes) {
+                alert('กรุณาเปิดไฟล์ PDF ก่อนทำการ Export');
+                return;
+            }
+
+            btnExport.textContent = 'กำลังประมวลผล...';
+            btnExport.disabled = true;
+
+            try {
+                const { PDFDocument, rgb, LineCapStyle, LineJoinStyle } = PDFLib;
+                const pdfDoc = await PDFDocument.load(originalPdfBytes);
+                const pages = pdfDoc.getPages();
+
+                for (let i = 0; i < pages.length; i++) {
+                    const pageNum = i + 1;
+                    const strokes = allStrokes[pageNum] || [];
+                    if (strokes.length === 0) continue;
+
+                    const page = pages[i];
+                    const pageHeight = page.getHeight();
+                    const scaleFactor = 1 / 1.5; 
+
+                    strokes.forEach(stroke => {
+                        const c = hexToRgbObj(stroke.color);
+                        const pdfColor = rgb(c.r, c.g, c.b);
+
+                        let pathStr = `M ${stroke.points[0].x} ${stroke.points[0].y}`;
+                        for (let j = 1; j < stroke.points.length; j++) {
+                            pathStr += ` L ${stroke.points[j].x} ${stroke.points[j].y}`;
+                        }
+
+                        if (stroke.points.length === 1) {
+                            pathStr += ` L ${stroke.points[0].x + 0.1} ${stroke.points[0].y}`;
+                        }
+
+                        page.drawSvgPath(pathStr, {
+                            x: 0,
+                            y: pageHeight, 
+                            borderColor: pdfColor,
+                            borderWidth: stroke.size, 
+                            borderLineCap: LineCapStyle.Round,
+                            borderLineJoin: LineJoinStyle.Round,
+                            scale: scaleFactor
+                        });
+                    });
+                }
+
+                const pdfBytes = await pdfDoc.save();
+                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                // ตั้งชื่อไฟล์ที่ Export ให้มีคำว่า _proofread ต่อท้ายชื่อเดิม
+                a.download = currentFileName.replace('.pdf', '') + '_proofread.pdf'; 
+                document.body.appendChild(a);
+                a.click();
+                
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+            } catch (error) {
+                console.error("Export Error: ", error);
+                alert("เกิดข้อผิดพลาดในการ Export ไฟล์");
+            } finally {
+                btnExport.textContent = '📥 Export';
+                btnExport.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
