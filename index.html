@@ -9,7 +9,7 @@
     <script src="pdf.min.js"></script>
     <script src="pdf-lib.min.js"></script>
 
-    <style>
+  <style>
         body {
             font-family: sans-serif;
             margin: 0;
@@ -18,12 +18,14 @@
             display: flex;
             flex-direction: column;
             align-items: center;
+            height: 100vh;
+            box-sizing: border-box;
             -webkit-user-select: none;
             -moz-user-select: none;
             -ms-user-select: none;
             user-select: none; 
             -webkit-touch-callout: none; 
-            overscroll-behavior-y: none;
+            overflow: hidden; /* ป้องกันไม่ให้ body เลื่อน แต่ให้เลื่อนในกล่องแทน */
         }
         .toolbar {
             background: white;
@@ -37,6 +39,7 @@
             justify-content: center;
             width: 100%;
             max-width: 1100px;
+            flex-shrink: 0;
         }
         .tool-group {
             display: flex;
@@ -97,10 +100,27 @@
             min-width: 80px;
             text-align: center;
         }
+        .zoom-info {
+            font-weight: bold;
+            min-width: 50px;
+            text-align: center;
+        }
+        .main-content {
+            flex-grow: 1;
+            width: 100%;
+            overflow: auto;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            background: #e9e9e9;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+        }
         .canvas-container {
             position: relative;
             box-shadow: 0 4px 15px rgba(0,0,0,0.2);
             background: white;
+            margin: 20px auto;
             -webkit-user-select: none;
             user-select: none;
             -webkit-touch-callout: none;
@@ -109,6 +129,7 @@
             position: absolute;
             top: 0;
             left: 0;
+            transform-origin: top left;
         }
         #draw-canvas {
             z-index: 10;
@@ -133,6 +154,12 @@
         </div>
 
         <div class="tool-group">
+            <button id="btn-zoom-out" disabled>➖ ย่อ</button>
+            <span class="zoom-info" id="zoom-info">150%</span>
+            <button id="btn-zoom-in" disabled>➕ ขยาย</button>
+        </div>
+
+        <div class="tool-group">
             <button class="tool-mode-btn active" data-tool="pen">✏️ วาดอิสระ</button>
             <button class="tool-mode-btn" data-tool="ruler">📏 เส้นตรง</button>
             <button class="tool-mode-btn" data-tool="lasso">➰ ลบวงล้อม</button>
@@ -143,7 +170,6 @@
             <button class="color-btn" style="background-color: #dc3545;" data-color="#dc3545" title="แดง"></button>
             <button class="color-btn" style="background-color: #007bff;" data-color="#007bff" title="น้ำเงิน"></button>
             <button class="color-btn" style="background-color: #28a745;" data-color="#28a745" title="เขียว"></button>
-            <button class="color-btn" style="background-color: #6f42c1;" data-color="#6f42c1" title="ม่วง"></button>
             <button class="color-btn" style="background-color: #ffc107;" data-color="#ffc107" title="เหลือง"></button>
         </div>
 
@@ -154,6 +180,7 @@
         </div>
 
         <div class="tool-group">
+            <button id="btn-undo" title="ย้อนกลับ (สูงสุด 2 ครั้ง)">↩️ Undo</button>
             <button id="btn-clear" title="ล้างเส้นหน้านี้">ล้าง</button>
             <button id="btn-save" title="บันทึกข้อมูลเผื่อสูญหาย">💾 บันทึก</button>
             <button id="btn-load" title="โหลดข้อมูลที่เคยบันทึกไว้">📂 โหลด</button>
@@ -161,9 +188,11 @@
         </div>
     </div>
 
-    <div class="canvas-container" id="container">
-        <canvas id="pdf-canvas"></canvas>
-        <canvas id="draw-canvas"></canvas>
+    <div class="main-content">
+        <div class="canvas-container" id="container">
+            <canvas id="pdf-canvas"></canvas>
+            <canvas id="draw-canvas"></canvas>
+        </div>
     </div>
 
     <script>
@@ -176,8 +205,13 @@
         const drawCanvas = document.getElementById('draw-canvas');
         const container = document.getElementById('container');
         const pageInfo = document.getElementById('page-info');
+        const zoomInfo = document.getElementById('zoom-info');
+        
         const btnPrev = document.getElementById('btn-prev');
         const btnNext = document.getElementById('btn-next');
+        const btnZoomIn = document.getElementById('btn-zoom-in');
+        const btnZoomOut = document.getElementById('btn-zoom-out');
+        const btnUndo = document.getElementById('btn-undo');
         const btnExport = document.getElementById('btn-export');
         const btnSave = document.getElementById('btn-save');
         const btnLoad = document.getElementById('btn-load');
@@ -187,9 +221,10 @@
 
         let currentPdf = null;
         let originalPdfBytes = null; 
-        let currentFileName = ''; // ตัวแปรเก็บชื่อไฟล์สำหรับผูกระบบเซฟ
+        let currentFileName = ''; 
         let currentPageNum = 1;
         let totalPages = 0;
+        let currentScale = 1.5; 
         
         let isDrawing = false;
         let currentMode = 'pen'; 
@@ -197,6 +232,8 @@
         let currentSize = 1; 
         
         let allStrokes = {}; 
+        let undoStacks = {}; // เก็บประวัติการวาดเพื่อทำ Undo (2 ชั้น)
+        
         let currentStroke = null;
         let startPos = null;
         let lassoPath = [];
@@ -223,11 +260,25 @@
             return inside;
         }
 
+        // ฟังก์ชันบันทึกสถานะก่อนการวาดใหม่ (รองรับ Undo 2 ชั้น)
+        function saveStateForUndo(pageNum) {
+            if (!undoStacks[pageNum]) undoStacks[pageNum] = [];
+            
+            // สำเนาข้อมูลลายเส้นปัจจุบันเก็บไว้
+            const currentState = JSON.parse(JSON.stringify(allStrokes[pageNum] || []));
+            undoStacks[pageNum].push(currentState);
+            
+            // เก็บไว้สูงสุดแค่ 2 ชั้น
+            if (undoStacks[pageNum].length > 2) {
+                undoStacks[pageNum].shift(); 
+            }
+        }
+
         pdfUpload.addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file || file.type !== 'application/pdf') return;
 
-            currentFileName = file.name; // จำชื่อไฟล์ไว้เพื่อแยกระบบเซฟ
+            currentFileName = file.name;
 
             const fileReader = new FileReader();
             fileReader.onload = function() {
@@ -238,13 +289,17 @@
                     totalPages = pdf.numPages;
                     currentPageNum = 1; 
                     allStrokes = {}; 
+                    undoStacks = {};
 
-                    // โหลดข้อมูลอัตโนมัติถ้าเคยมีไฟล์นี้เซฟไว้
-                    const savedData = localStorage.getItem('pdfDraft_' + currentFileName);
+                    // ใช้ Key ใหม่ pdfDraftV2_ เพื่อป้องกันพิกัดขัดแย้งกับเวอร์ชันเก่า
+                    const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
                     if (savedData) {
                         allStrokes = JSON.parse(savedData);
                     }
 
+                    btnZoomIn.disabled = false;
+                    btnZoomOut.disabled = false;
+                    
                     renderPage(currentPageNum);
                 });
             };
@@ -253,7 +308,7 @@
 
         function renderPage(pageNum) {
             currentPdf.getPage(pageNum).then(page => {
-                const viewport = page.getViewport({ scale: 1.5 });
+                const viewport = page.getViewport({ scale: currentScale });
                 const dpr = window.devicePixelRatio || 1;
                 
                 pdfCanvas.width = viewport.width * dpr;
@@ -276,7 +331,8 @@
                 };
                 page.render(renderContext);
                 
-                drawCtx.scale(dpr, dpr);
+                // สเกล Canvas ให้ตรงกับการซูม
+                drawCtx.scale(dpr * currentScale, dpr * currentScale);
                 drawCtx.lineCap = 'round';
                 drawCtx.lineJoin = 'round';
 
@@ -298,6 +354,34 @@
             if (currentPageNum >= totalPages) return;
             currentPageNum++;
             renderPage(currentPageNum);
+        });
+
+        btnZoomIn.addEventListener('click', () => {
+            if (!currentPdf) return;
+            currentScale += 0.25;
+            zoomInfo.textContent = Math.round(currentScale * 100) + '%';
+            renderPage(currentPageNum);
+        });
+
+        btnZoomOut.addEventListener('click', () => {
+            if (!currentPdf || currentScale <= 0.5) return;
+            currentScale -= 0.25;
+            zoomInfo.textContent = Math.round(currentScale * 100) + '%';
+            renderPage(currentPageNum);
+        });
+
+        btnUndo.addEventListener('click', () => {
+            if (!currentPdf || !undoStacks[currentPageNum] || undoStacks[currentPageNum].length === 0) return;
+            
+            // ดึงสถานะก่อนหน้าออกมา
+            const previousState = undoStacks[currentPageNum].pop();
+            allStrokes[currentPageNum] = previousState;
+            
+            redrawAllStrokes(currentPageNum);
+            
+            if (currentFileName) {
+                localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
+            }
         });
 
         document.querySelectorAll('.tool-mode-btn').forEach(btn => {
@@ -326,9 +410,10 @@
 
         function getPointerPos(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
+            // หารด้วย currentScale เพื่อแปลงพิกัดกลับไปเป็น Scale 1.0 (ขนาดปกติ) เสมอ
             return {
-                x: evt.clientX - rect.left,
-                y: evt.clientY - rect.top
+                x: (evt.clientX - rect.left) / currentScale,
+                y: (evt.clientY - rect.top) / currentScale
             };
         }
 
@@ -405,8 +490,10 @@
                 }
 
                 if (currentMode === 'pen') {
+                    saveStateForUndo(currentPageNum);
                     allStrokes[currentPageNum].push(currentStroke);
                 } else if (currentMode === 'ruler') {
+                    saveStateForUndo(currentPageNum);
                     allStrokes[currentPageNum].push({
                         color: currentColor,
                         size: currentSize,
@@ -417,6 +504,7 @@
                     });
                 } else if (currentMode === 'lasso') {
                     if (lassoPath.length > 2) {
+                        saveStateForUndo(currentPageNum);
                         const currentStrokes = allStrokes[currentPageNum] || [];
                         allStrokes[currentPageNum] = currentStrokes.filter(stroke => {
                             const isInside = stroke.points.some(p => isPointInPolygon(p, lassoPath));
@@ -428,9 +516,8 @@
                 
                 redrawAllStrokes(currentPageNum);
 
-                // ระบบ Auto-Save ซ่อนการทำงานอยู่เบื้องหลังทุกครั้งที่ลากเส้นเสร็จ
                 if (currentFileName) {
-                    localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+                    localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
                 }
             }
         }
@@ -439,8 +526,10 @@
         drawCanvas.addEventListener('pointercancel', saveStroke);
 
         function redrawAllStrokes(pageNum) {
-            const dpr = window.devicePixelRatio || 1;
-            drawCtx.clearRect(0, 0, drawCanvas.width / dpr, drawCanvas.height / dpr);
+            // ป้องกันการเคลียร์พื้นที่ผิดขนาดเนื่องจากมีระบบ Scale
+            const clearWidth = drawCanvas.width / (window.devicePixelRatio || 1) / currentScale;
+            const clearHeight = drawCanvas.height / (window.devicePixelRatio || 1) / currentScale;
+            drawCtx.clearRect(0, 0, clearWidth, clearHeight);
             
             const strokesForPage = allStrokes[pageNum] || [];
             
@@ -463,8 +552,8 @@
                 drawCtx.beginPath();
                 drawCtx.strokeStyle = 'rgba(0, 122, 255, 0.8)';
                 drawCtx.fillStyle = 'rgba(0, 122, 255, 0.2)';
-                drawCtx.setLineDash([5, 5]); 
-                drawCtx.lineWidth = 1;
+                drawCtx.setLineDash([5 / currentScale, 5 / currentScale]); 
+                drawCtx.lineWidth = 1 / currentScale;
                 drawCtx.moveTo(lassoPath[0].x, lassoPath[0].y);
                 for(let i = 1; i < lassoPath.length; i++) {
                     drawCtx.lineTo(lassoPath[i].x, lassoPath[i].y);
@@ -478,33 +567,32 @@
 
         document.getElementById('btn-clear').addEventListener('click', () => {
             if (!currentPdf) return;
+            saveStateForUndo(currentPageNum);
             allStrokes[currentPageNum] = []; 
             redrawAllStrokes(currentPageNum);
-            // ลบแล้วอัปเดต Auto-Save ด้วย
             if (currentFileName) {
-                localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+                localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
             }
         });
 
-        // ปุ่มเซฟแบบกดเอง
         btnSave.addEventListener('click', () => {
             if (!currentPdf) {
                 alert('กรุณาเปิดไฟล์ PDF ก่อนบันทึก');
                 return;
             }
-            localStorage.setItem('pdfDraft_' + currentFileName, JSON.stringify(allStrokes));
+            localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
             alert('บันทึกฉบับร่างของไฟล์ "' + currentFileName + '" เรียบร้อยแล้ว');
         });
 
-        // ปุ่มโหลดแบบกดเอง
         btnLoad.addEventListener('click', () => {
             if (!currentPdf) {
                 alert('กรุณาเปิดไฟล์ PDF ก่อนโหลดข้อมูล');
                 return;
             }
-            const savedData = localStorage.getItem('pdfDraft_' + currentFileName);
+            const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
             if (savedData) {
                 allStrokes = JSON.parse(savedData);
+                undoStacks = {}; // รีเซ็ตประวัติ Undo เมื่อโหลดใหม่
                 redrawAllStrokes(currentPageNum);
                 alert('โหลดข้อมูลเรียบร้อยแล้ว');
             } else {
@@ -533,7 +621,9 @@
 
                     const page = pages[i];
                     const pageHeight = page.getHeight();
-                    const scaleFactor = 1 / 1.5; 
+                    
+                    // เนื่องจากพิกัดถูกจัดเก็บในรูปแบบ Scale 1.0 (ขนาดปกติของ PDF) แล้ว จึงตั้งค่า scale เป็น 1 ได้เลย
+                    const scaleFactor = 1.0; 
 
                     strokes.forEach(stroke => {
                         const c = hexToRgbObj(stroke.color);
@@ -566,7 +656,6 @@
                 
                 const a = document.createElement('a');
                 a.href = url;
-                // ตั้งชื่อไฟล์ที่ Export ให้มีคำว่า _proofread ต่อท้ายชื่อเดิม
                 a.download = currentFileName.replace('.pdf', '') + '_proofread.pdf'; 
                 document.body.appendChild(a);
                 a.click();
