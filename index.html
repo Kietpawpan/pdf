@@ -9,7 +9,6 @@
     <script src="pdf.min.js"></script>
     <script src="pdf-lib.min.js"></script>
 -->
-
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -118,33 +117,40 @@
             min-width: 50px;
             text-align: center;
         }
+        
         .main-content {
             flex-grow: 1;
             width: 100%;
             overflow: auto;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
+            position: relative;
             background: #e9e9e9;
             border: 1px solid #ccc;
             border-radius: 8px;
-            touch-action: none; /* ควบคุม touch เองผ่าน JS */
+            touch-action: none; 
         }
-        .canvas-container {
-            position: relative;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        
+        #virtual-document {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none; 
             background: white;
-            margin: 20px auto;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+
+        .canvas-container {
+            position: absolute; 
+            top: 0;
+            left: 0;
             -webkit-user-select: none;
             user-select: none;
             -webkit-touch-callout: none;
-            transition: transform 0.1s ease-out; /* สำหรับความลื่นไหลตอนปล่อยนิ้วซูม */
+            transform-origin: top left;
         }
         #pdf-canvas, #draw-canvas {
             position: absolute;
             top: 0;
             left: 0;
-            transform-origin: top left;
         }
         #draw-canvas {
             z-index: 10;
@@ -186,6 +192,7 @@
             <button class="color-btn" style="background-color: #007bff;" data-color="#007bff" title="น้ำเงิน"></button>
             <button class="color-btn" style="background-color: #28a745;" data-color="#28a745" title="เขียว"></button>
             <button class="color-btn" style="background-color: #ffc107;" data-color="#ffc107" title="เหลือง"></button>
+            <button class="color-btn" style="background-color: #800080;" data-color="#800080" title="ม่วง"></button>
         </div>
 
         <div class="tool-group">
@@ -195,7 +202,8 @@
         </div>
 
         <div class="tool-group">
-            <button id="btn-undo" title="ย้อนกลับ (สูงสุด 2 ครั้ง)">↩️ Undo</button>
+            <button id="btn-undo" title="ย้อนกลับ (สูงสุด 5 ครั้ง)">↩️ Undo</button>
+            <button id="btn-redo" title="ทำซ้ำ">↪️ Redo</button>
             <button id="btn-clear" title="ล้างเส้นหน้านี้">ล้าง</button>
             <button id="btn-save" title="บันทึกข้อมูลเผื่อสูญหาย">💾 บันทึก</button>
             <button id="btn-export" class="export-btn">📥 Export</button>
@@ -203,6 +211,7 @@
     </div>
 
     <div class="main-content" id="scroll-area">
+        <div id="virtual-document"></div>
         <div class="canvas-container" id="container">
             <canvas id="pdf-canvas"></canvas>
             <canvas id="draw-canvas"></canvas>
@@ -219,6 +228,7 @@
         const drawCanvas = document.getElementById('draw-canvas');
         const container = document.getElementById('container');
         const scrollArea = document.getElementById('scroll-area');
+        const virtualDocument = document.getElementById('virtual-document');
         
         const pageInput = document.getElementById('page-input');
         const totalPagesSpan = document.getElementById('total-pages');
@@ -229,6 +239,7 @@
         const btnZoomIn = document.getElementById('btn-zoom-in');
         const btnZoomOut = document.getElementById('btn-zoom-out');
         const btnUndo = document.getElementById('btn-undo');
+        const btnRedo = document.getElementById('btn-redo'); // ตัวแปรสำหรับปุ่ม Redo
         const btnExport = document.getElementById('btn-export');
         const btnSave = document.getElementById('btn-save');
         
@@ -242,6 +253,10 @@
         let totalPages = 0;
         let currentScale = 1.5; 
         
+        let scrollOffsetX = 0;
+        let scrollOffsetY = 0;
+        let renderTimeout;
+        
         let isDrawing = false;
         let currentMode = 'pen'; 
         let currentColor = '#000000';
@@ -249,12 +264,12 @@
         
         let allStrokes = {}; 
         let undoStacks = {}; 
+        let redoStacks = {}; // เพิ่มตัวแปรเก็บสถานะ Redo
         
         let currentStroke = null;
         let startPos = null;
         let lassoPath = [];
 
-        // ตัวแปรสำหรับระบบ Touch และ Zoom
         let activeTouches = new Map();
         let touchPanMode = false;
         let isPinching = false;
@@ -288,9 +303,11 @@
             if (!undoStacks[pageNum]) undoStacks[pageNum] = [];
             const currentState = JSON.parse(JSON.stringify(allStrokes[pageNum] || []));
             undoStacks[pageNum].push(currentState);
-            if (undoStacks[pageNum].length > 5) { // ขยาย Undo เป็น 5 ครั้ง
+            if (undoStacks[pageNum].length > 5) { 
                 undoStacks[pageNum].shift(); 
             }
+            // เมื่อมีการวาดเส้นใหม่ ให้ล้างประวัติ Redo ของหน้านั้นทิ้ง
+            redoStacks[pageNum] = [];
         }
 
         pdfUpload.addEventListener('change', function(e) {
@@ -309,6 +326,7 @@
                     currentPageNum = 1; 
                     allStrokes = {}; 
                     undoStacks = {};
+                    redoStacks = {};
 
                     const savedData = localStorage.getItem('pdfDraftV3_' + currentFileName);
                     if (savedData) {
@@ -319,58 +337,92 @@
                     btnZoomOut.disabled = false;
                     pageInput.disabled = false;
                     
-                    renderPage(currentPageNum);
+                    renderVisiblePage(currentPageNum);
                 });
             };
             fileReader.readAsArrayBuffer(file);
         });
 
-        function renderPage(pageNum) {
+        function renderVisiblePage(pageNum) {
+            if (!currentPdf) return;
             currentPdf.getPage(pageNum).then(page => {
                 const viewport = page.getViewport({ scale: currentScale });
                 const dpr = window.devicePixelRatio || 1;
                 
-                pdfCanvas.width = viewport.width * dpr;
-                pdfCanvas.height = viewport.height * dpr;
-                drawCanvas.width = viewport.width * dpr;
-                drawCanvas.height = viewport.height * dpr;
+                virtualDocument.style.width = viewport.width + 'px';
+                virtualDocument.style.height = viewport.height + 'px';
 
-                pdfCanvas.style.width = viewport.width + 'px';
-                pdfCanvas.style.height = viewport.height + 'px';
-                drawCanvas.style.width = viewport.width + 'px';
-                drawCanvas.style.height = viewport.height + 'px';
+                const containerWidth = scrollArea.clientWidth;
+                const containerHeight = scrollArea.clientHeight;
                 
-                container.style.width = viewport.width + 'px';
-                container.style.height = viewport.height + 'px';
-                container.style.transform = 'none'; // รีเซ็ต CSS Zoom
+                const renderWidth = Math.max(1, Math.min(containerWidth, viewport.width - scrollOffsetX));
+                const renderHeight = Math.max(1, Math.min(containerHeight, viewport.height - scrollOffsetY));
+
+                pdfCanvas.style.width = renderWidth + 'px';
+                pdfCanvas.style.height = renderHeight + 'px';
+                drawCanvas.style.width = renderWidth + 'px';
+                drawCanvas.style.height = renderHeight + 'px';
+                
+                pdfCanvas.width = renderWidth * dpr;
+                pdfCanvas.height = renderHeight * dpr;
+                drawCanvas.width = renderWidth * dpr;
+                drawCanvas.height = renderHeight * dpr;
+
+                const transform = [
+                    dpr, 0, 
+                    0, dpr, 
+                    -scrollOffsetX * dpr, -scrollOffsetY * dpr 
+                ];
 
                 const renderContext = {
                     canvasContext: pdfCtx,
-                    transform: [dpr, 0, 0, dpr, 0, 0], 
-                    viewport: viewport
+                    transform: transform,
+                    viewport: viewport 
                 };
-                page.render(renderContext);
                 
-                drawCtx.scale(dpr * currentScale, dpr * currentScale);
-                drawCtx.lineCap = 'round';
-                drawCtx.lineJoin = 'round';
+                page.render(renderContext).promise.then(() => {
+                    drawCtx.setTransform(1, 0, 0, 1, 0, 0); 
+                    drawCtx.scale(dpr * currentScale, dpr * currentScale);
+                    drawCtx.translate(-scrollOffsetX / currentScale, -scrollOffsetY / currentScale);
+                    drawCtx.lineCap = 'round';
+                    drawCtx.lineJoin = 'round';
+                    
+                    redrawAllStrokes(pageNum);
+                });
 
                 pageInput.value = pageNum;
                 totalPagesSpan.textContent = totalPages;
-                
                 btnPrev.disabled = pageNum <= 1;
                 btnNext.disabled = pageNum >= totalPages;
-
-                redrawAllStrokes(pageNum);
             });
         }
 
-        // ระบบเลือกหน้ากระดาษ
+        scrollArea.addEventListener('scroll', () => {
+            if (!currentPdf || isPinching) return;
+            
+            scrollOffsetX = scrollArea.scrollLeft;
+            scrollOffsetY = scrollArea.scrollTop;
+            
+            container.style.left = scrollOffsetX + 'px';
+            container.style.top = scrollOffsetY + 'px';
+            
+            clearTimeout(renderTimeout);
+            renderTimeout = setTimeout(() => {
+                renderVisiblePage(currentPageNum);
+            }, 150);
+        });
+
         pageInput.addEventListener('change', (e) => {
             let newPage = parseInt(e.target.value);
             if (newPage >= 1 && newPage <= totalPages) {
                 currentPageNum = newPage;
-                renderPage(currentPageNum);
+                scrollArea.scrollLeft = 0;
+                scrollArea.scrollTop = 0;
+                scrollOffsetX = 0;
+                scrollOffsetY = 0;
+                container.style.left = '0px';
+                container.style.top = '0px';
+                renderVisiblePage(currentPageNum);
             } else {
                 e.target.value = currentPageNum;
             }
@@ -379,34 +431,62 @@
         btnPrev.addEventListener('click', () => {
             if (currentPageNum <= 1) return;
             currentPageNum--;
-            renderPage(currentPageNum);
+            scrollArea.scrollLeft = 0;
+            scrollArea.scrollTop = 0;
+            renderVisiblePage(currentPageNum);
         });
 
         btnNext.addEventListener('click', () => {
             if (currentPageNum >= totalPages) return;
             currentPageNum++;
-            renderPage(currentPageNum);
+            scrollArea.scrollLeft = 0;
+            scrollArea.scrollTop = 0;
+            renderVisiblePage(currentPageNum);
         });
 
-        btnZoomIn.addEventListener('click', () => {
+        function adjustZoom(delta) {
             if (!currentPdf) return;
-            currentScale += 0.25;
+            currentScale += delta;
+            if (currentScale < 0.5) currentScale = 0.5;
+            if (currentScale > 5.0) currentScale = 5.0;
             zoomInfo.textContent = Math.round(currentScale * 100) + '%';
-            renderPage(currentPageNum);
-        });
+            renderVisiblePage(currentPageNum);
+        }
 
-        btnZoomOut.addEventListener('click', () => {
-            if (!currentPdf || currentScale <= 0.5) return;
-            currentScale -= 0.25;
-            zoomInfo.textContent = Math.round(currentScale * 100) + '%';
-            renderPage(currentPageNum);
-        });
+        btnZoomIn.addEventListener('click', () => adjustZoom(0.25));
+        btnZoomOut.addEventListener('click', () => adjustZoom(-0.25));
 
+        // ระบบ Undo
         btnUndo.addEventListener('click', () => {
             if (!currentPdf || !undoStacks[currentPageNum] || undoStacks[currentPageNum].length === 0) return;
             
+            // เก็บสถานะปัจจุบันลง Redo Stack ก่อนที่จะย้อนกลับ
+            if (!redoStacks[currentPageNum]) redoStacks[currentPageNum] = [];
+            const currentState = JSON.parse(JSON.stringify(allStrokes[currentPageNum] || []));
+            redoStacks[currentPageNum].push(currentState);
+            
+            // ดึงสถานะก่อนหน้ามาใช้งาน
             const previousState = undoStacks[currentPageNum].pop();
             allStrokes[currentPageNum] = previousState;
+            redrawAllStrokes(currentPageNum);
+            
+            if (currentFileName) {
+                localStorage.setItem('pdfDraftV3_' + currentFileName, JSON.stringify(allStrokes));
+            }
+        });
+
+        // ระบบ Redo
+        btnRedo.addEventListener('click', () => {
+            if (!currentPdf || !redoStacks[currentPageNum] || redoStacks[currentPageNum].length === 0) return;
+            
+            // เก็บสถานะปัจจุบันลง Undo Stack ก่อนที่จะเดินหน้า
+            if (!undoStacks[currentPageNum]) undoStacks[currentPageNum] = [];
+            const currentState = JSON.parse(JSON.stringify(allStrokes[currentPageNum] || []));
+            undoStacks[currentPageNum].push(currentState);
+            
+            // ดึงสถานะจาก Redo Stack มาใช้งาน
+            const nextState = redoStacks[currentPageNum].pop();
+            allStrokes[currentPageNum] = nextState;
             redrawAllStrokes(currentPageNum);
             
             if (currentFileName) {
@@ -440,41 +520,35 @@
 
         function getPointerPos(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
-            // ต้องนำค่า scale ปัจจุบันมาหารเพื่อให้ได้พิกัดที่แท้จริง
             return {
-                x: (evt.clientX - rect.left) / currentScale,
-                y: (evt.clientY - rect.top) / currentScale
+                x: ((evt.clientX - rect.left) + scrollOffsetX) / currentScale,
+                y: ((evt.clientY - rect.top) + scrollOffsetY) / currentScale
             };
         }
-
-        // --- ระบบ Touch / Pan / Zoom / Draw ---
 
         drawCanvas.addEventListener('pointerdown', (e) => {
             if (!currentPdf) return; 
             drawCanvas.setPointerCapture(e.pointerId);
 
-            // 1. จัดการการใช้นิ้วสัมผัส (Touch) สำหรับเลื่อนและซูม
             if (e.pointerType === 'touch') {
                 activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
                 
                 if (activeTouches.size === 1) {
-                    // เลื่อนด้วย 1 นิ้ว
                     touchPanMode = true;
                     isPinching = false;
                     const touch = activeTouches.get(e.pointerId);
                     lastPanPoint = { x: touch.x, y: touch.y };
                 } else if (activeTouches.size === 2) {
-                    // ซูมด้วย 2 นิ้ว
                     isPinching = true;
                     touchPanMode = false;
                     const touches = Array.from(activeTouches.values());
                     initialPinchDistance = Math.hypot(touches[0].x - touches[1].x, touches[0].y - touches[1].y);
                     pinchStartScale = currentScale;
+                    container.style.transformOrigin = 'top left'; 
                 }
-                return; // หยุดทำงานแค่นี้ ไม่เข้าสู่โหมดวาดรูป
+                return; 
             }
 
-            // 2. จัดการการวาดรูป รองรับเฉพาะ Apple Pencil (pen) หรือ เมาส์
             if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
                 isDrawing = true;
                 touchPanMode = false;
@@ -502,27 +576,19 @@
         drawCanvas.addEventListener('pointermove', (e) => {
             e.preventDefault(); 
             
-            // 1. ตรวจจับการลากนิ้วเพื่อเลื่อนหรือซูม
             if (e.pointerType === 'touch' && activeTouches.has(e.pointerId)) {
                 activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
                 
                 if (isPinching && activeTouches.size === 2) {
-                    // ถ่างนิ้วซูมผ่าน CSS เพื่อความลื่นไหล
                     const touches = Array.from(activeTouches.values());
                     const currentDistance = Math.hypot(touches[0].x - touches[1].x, touches[0].y - touches[1].y);
                     const zoomFactor = currentDistance / initialPinchDistance;
                     
                     container.style.transform = `scale(${zoomFactor})`;
-                    // คำนวณจุดกึ่งกลางระหว่าง 2 นิ้วเพื่อยึดจุดซูม
-                    const centerX = (touches[0].x + touches[1].x) / 2;
-                    const centerY = (touches[0].y + touches[1].y) / 2;
-                    const rect = scrollArea.getBoundingClientRect();
-                    container.style.transformOrigin = `${centerX - rect.left + scrollArea.scrollLeft}px ${centerY - rect.top + scrollArea.scrollTop}px`;
                     return;
                 }
                 
                 if (touchPanMode && activeTouches.size === 1) {
-                    // ลากนิ้ว 1 นิ้วเพื่อเลื่อนหน้ากระดาษ
                     const touch = activeTouches.get(e.pointerId);
                     const dx = touch.x - lastPanPoint.x;
                     const dy = touch.y - lastPanPoint.y;
@@ -535,7 +601,6 @@
                 }
             }
 
-            // 2. การวาดด้วยปากกา
             if (!isDrawing) return;
             if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
                 const currentPos = getPointerPos(drawCanvas, e);
@@ -562,11 +627,9 @@
         });
 
         function saveStroke(e) {
-            // ยกเลิกการใช้นิ้ว
             if (e.pointerType === 'touch') {
                 activeTouches.delete(e.pointerId);
                 
-                // หากกำลังซูมอยู่และปล่อยนิ้ว ให้คำนวณ Scale ล่าสุดและเรนเดอร์ PDF ใหม่ให้ชัดเจน
                 if (isPinching && activeTouches.size < 2) {
                     isPinching = false;
                     const transformStr = container.style.transform;
@@ -576,14 +639,12 @@
                         if (match && match[1]) {
                             const finalZoomFactor = parseFloat(match[1]);
                             currentScale = pinchStartScale * finalZoomFactor;
-                            
-                            // จำกัดขนาดการซูม
                             if (currentScale < 0.5) currentScale = 0.5;
                             if (currentScale > 5.0) currentScale = 5.0;
                             
                             zoomInfo.textContent = Math.round(currentScale * 100) + '%';
-                            container.style.transform = 'none'; // เอา CSS ออกแล้ววาดใหม่แบบคมชัด
-                            renderPage(currentPageNum);
+                            container.style.transform = 'none'; 
+                            renderVisiblePage(currentPageNum);
                         }
                     }
                 }
@@ -598,7 +659,6 @@
                 return; 
             }
             
-            // บันทึกเส้นสำหรับปากกา
             if (isDrawing && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
                 isDrawing = false;
                 if (drawCanvas.hasPointerCapture(e.pointerId)) {
@@ -650,7 +710,11 @@
         function redrawAllStrokes(pageNum) {
             const clearWidth = drawCanvas.width / (window.devicePixelRatio || 1) / currentScale;
             const clearHeight = drawCanvas.height / (window.devicePixelRatio || 1) / currentScale;
-            drawCtx.clearRect(0, 0, clearWidth, clearHeight);
+            
+            drawCtx.save();
+            drawCtx.setTransform(1, 0, 0, 1, 0, 0);
+            drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+            drawCtx.restore();
             
             const strokesForPage = allStrokes[pageNum] || [];
             
