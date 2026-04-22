@@ -9,6 +9,7 @@
     <script src="pdf.min.js"></script>
     <script src="pdf-lib.min.js"></script>
 -->
+
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
@@ -25,8 +26,6 @@
             height: 100vh;
             box-sizing: border-box;
             -webkit-user-select: none;
-            -moz-user-select: none;
-            -ms-user-select: none;
             user-select: none; 
             -webkit-touch-callout: none; 
             overflow: hidden;
@@ -44,6 +43,7 @@
             width: 100%;
             max-width: 1100px;
             flex-shrink: 0;
+            z-index: 100;
         }
         .tool-group {
             display: flex;
@@ -99,10 +99,19 @@
             border-color: #333;
             transform: scale(1.1);
         }
-        .page-info {
-            font-weight: bold;
-            min-width: 80px;
+        .page-control {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .page-input {
+            width: 45px;
             text-align: center;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 6px;
+            font-size: 14px;
+            font-weight: bold;
         }
         .zoom-info {
             font-weight: bold;
@@ -119,6 +128,7 @@
             background: #e9e9e9;
             border: 1px solid #ccc;
             border-radius: 8px;
+            touch-action: none; /* ควบคุม touch เองผ่าน JS */
         }
         .canvas-container {
             position: relative;
@@ -128,6 +138,7 @@
             -webkit-user-select: none;
             user-select: none;
             -webkit-touch-callout: none;
+            transition: transform 0.1s ease-out; /* สำหรับความลื่นไหลตอนปล่อยนิ้วซูม */
         }
         #pdf-canvas, #draw-canvas {
             position: absolute;
@@ -138,7 +149,6 @@
         #draw-canvas {
             z-index: 10;
             cursor: crosshair;
-            touch-action: none; 
             outline: none;
             -webkit-tap-highlight-color: transparent;
         }
@@ -151,9 +161,10 @@
             <input type="file" id="pdf-upload" accept="application/pdf">
         </div>
 
-        <div class="tool-group">
+        <div class="tool-group page-control">
             <button id="btn-prev" disabled>◀</button>
-            <span class="page-info" id="page-info">หน้า - / -</span>
+            <input type="number" id="page-input" class="page-input" min="1" value="1" disabled title="พิมพ์เลขหน้าแล้วกด Enter">
+            <span style="font-weight: bold;">/ <span id="total-pages">-</span></span>
             <button id="btn-next" disabled>▶</button>
         </div>
 
@@ -187,12 +198,11 @@
             <button id="btn-undo" title="ย้อนกลับ (สูงสุด 2 ครั้ง)">↩️ Undo</button>
             <button id="btn-clear" title="ล้างเส้นหน้านี้">ล้าง</button>
             <button id="btn-save" title="บันทึกข้อมูลเผื่อสูญหาย">💾 บันทึก</button>
-            <button id="btn-load" title="โหลดข้อมูลที่เคยบันทึกไว้">📂 โหลด</button>
             <button id="btn-export" class="export-btn">📥 Export</button>
         </div>
     </div>
 
-    <div class="main-content">
+    <div class="main-content" id="scroll-area">
         <div class="canvas-container" id="container">
             <canvas id="pdf-canvas"></canvas>
             <canvas id="draw-canvas"></canvas>
@@ -208,7 +218,10 @@
         const pdfCanvas = document.getElementById('pdf-canvas');
         const drawCanvas = document.getElementById('draw-canvas');
         const container = document.getElementById('container');
-        const pageInfo = document.getElementById('page-info');
+        const scrollArea = document.getElementById('scroll-area');
+        
+        const pageInput = document.getElementById('page-input');
+        const totalPagesSpan = document.getElementById('total-pages');
         const zoomInfo = document.getElementById('zoom-info');
         
         const btnPrev = document.getElementById('btn-prev');
@@ -218,10 +231,9 @@
         const btnUndo = document.getElementById('btn-undo');
         const btnExport = document.getElementById('btn-export');
         const btnSave = document.getElementById('btn-save');
-        const btnLoad = document.getElementById('btn-load');
         
         const pdfCtx = pdfCanvas.getContext('2d');
-        const drawCtx = drawCanvas.getContext('2d');
+        const drawCtx = drawCanvas.getContext('2d', { willReadFrequently: true });
 
         let currentPdf = null;
         let originalPdfBytes = null; 
@@ -242,9 +254,13 @@
         let startPos = null;
         let lassoPath = [];
 
+        // ตัวแปรสำหรับระบบ Touch และ Zoom
         let activeTouches = new Map();
         let touchPanMode = false;
+        let isPinching = false;
         let lastPanPoint = null;
+        let initialPinchDistance = 0;
+        let pinchStartScale = 1;
 
         function hexToRgbObj(hex) {
             let r = 0; let g = 0; let b = 0;
@@ -270,11 +286,9 @@
 
         function saveStateForUndo(pageNum) {
             if (!undoStacks[pageNum]) undoStacks[pageNum] = [];
-            
             const currentState = JSON.parse(JSON.stringify(allStrokes[pageNum] || []));
             undoStacks[pageNum].push(currentState);
-            
-            if (undoStacks[pageNum].length > 2) {
+            if (undoStacks[pageNum].length > 5) { // ขยาย Undo เป็น 5 ครั้ง
                 undoStacks[pageNum].shift(); 
             }
         }
@@ -284,8 +298,8 @@
             if (!file || file.type !== 'application/pdf') return;
 
             currentFileName = file.name;
-
             const fileReader = new FileReader();
+            
             fileReader.onload = function() {
                 originalPdfBytes = new Uint8Array(this.result); 
                 
@@ -296,13 +310,14 @@
                     allStrokes = {}; 
                     undoStacks = {};
 
-                    const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
+                    const savedData = localStorage.getItem('pdfDraftV3_' + currentFileName);
                     if (savedData) {
                         allStrokes = JSON.parse(savedData);
                     }
 
                     btnZoomIn.disabled = false;
                     btnZoomOut.disabled = false;
+                    pageInput.disabled = false;
                     
                     renderPage(currentPageNum);
                 });
@@ -327,6 +342,7 @@
                 
                 container.style.width = viewport.width + 'px';
                 container.style.height = viewport.height + 'px';
+                container.style.transform = 'none'; // รีเซ็ต CSS Zoom
 
                 const renderContext = {
                     canvasContext: pdfCtx,
@@ -339,13 +355,26 @@
                 drawCtx.lineCap = 'round';
                 drawCtx.lineJoin = 'round';
 
-                pageInfo.textContent = `หน้า ${pageNum} / ${totalPages}`;
+                pageInput.value = pageNum;
+                totalPagesSpan.textContent = totalPages;
+                
                 btnPrev.disabled = pageNum <= 1;
                 btnNext.disabled = pageNum >= totalPages;
 
                 redrawAllStrokes(pageNum);
             });
         }
+
+        // ระบบเลือกหน้ากระดาษ
+        pageInput.addEventListener('change', (e) => {
+            let newPage = parseInt(e.target.value);
+            if (newPage >= 1 && newPage <= totalPages) {
+                currentPageNum = newPage;
+                renderPage(currentPageNum);
+            } else {
+                e.target.value = currentPageNum;
+            }
+        });
 
         btnPrev.addEventListener('click', () => {
             if (currentPageNum <= 1) return;
@@ -378,11 +407,10 @@
             
             const previousState = undoStacks[currentPageNum].pop();
             allStrokes[currentPageNum] = previousState;
-            
             redrawAllStrokes(currentPageNum);
             
             if (currentFileName) {
-                localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
+                localStorage.setItem('pdfDraftV3_' + currentFileName, JSON.stringify(allStrokes));
             }
         });
 
@@ -412,133 +440,166 @@
 
         function getPointerPos(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
+            // ต้องนำค่า scale ปัจจุบันมาหารเพื่อให้ได้พิกัดที่แท้จริง
             return {
                 x: (evt.clientX - rect.left) / currentScale,
                 y: (evt.clientY - rect.top) / currentScale
             };
         }
 
-        drawCanvas.addEventListener('dblclick', function(e) {
-            e.preventDefault();
-        });
+        // --- ระบบ Touch / Pan / Zoom / Draw ---
 
         drawCanvas.addEventListener('pointerdown', (e) => {
             if (!currentPdf) return; 
-            
             drawCanvas.setPointerCapture(e.pointerId);
 
+            // 1. จัดการการใช้นิ้วสัมผัส (Touch) สำหรับเลื่อนและซูม
             if (e.pointerType === 'touch') {
                 activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
                 
-                if (activeTouches.size === 2) {
+                if (activeTouches.size === 1) {
+                    // เลื่อนด้วย 1 นิ้ว
                     touchPanMode = true;
-                    isDrawing = false; 
-                    redrawAllStrokes(currentPageNum); 
-                    
+                    isPinching = false;
+                    const touch = activeTouches.get(e.pointerId);
+                    lastPanPoint = { x: touch.x, y: touch.y };
+                } else if (activeTouches.size === 2) {
+                    // ซูมด้วย 2 นิ้ว
+                    isPinching = true;
+                    touchPanMode = false;
                     const touches = Array.from(activeTouches.values());
-                    lastPanPoint = {
-                        x: (touches[0].x + touches[1].x) / 2,
-                        y: (touches[0].y + touches[1].y) / 2
-                    };
-                    return;
-                } else if (activeTouches.size > 2) {
-                    return;
+                    initialPinchDistance = Math.hypot(touches[0].x - touches[1].x, touches[0].y - touches[1].y);
+                    pinchStartScale = currentScale;
                 }
+                return; // หยุดทำงานแค่นี้ ไม่เข้าสู่โหมดวาดรูป
             }
 
-            isDrawing = true;
-            touchPanMode = false;
-            startPos = getPointerPos(drawCanvas, e);
-            
-            if (currentMode === 'pen') {
-                currentStroke = {
-                    color: currentColor,
-                    size: currentSize,
-                    points: [{ x: startPos.x, y: startPos.y }]
-                };
+            // 2. จัดการการวาดรูป รองรับเฉพาะ Apple Pencil (pen) หรือ เมาส์
+            if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
+                isDrawing = true;
+                touchPanMode = false;
+                startPos = getPointerPos(drawCanvas, e);
                 
-                drawCtx.beginPath();
-                drawCtx.moveTo(startPos.x, startPos.y);
-                drawCtx.fillStyle = currentColor;
-                drawCtx.arc(startPos.x, startPos.y, currentSize / 2, 0, Math.PI * 2);
-                drawCtx.fill();
-                drawCtx.beginPath();
-                drawCtx.moveTo(startPos.x, startPos.y);
-            } else if (currentMode === 'lasso') {
-                lassoPath = [{ x: startPos.x, y: startPos.y }];
+                if (currentMode === 'pen') {
+                    currentStroke = {
+                        color: currentColor,
+                        size: currentSize,
+                        points: [{ x: startPos.x, y: startPos.y }]
+                    };
+                    drawCtx.beginPath();
+                    drawCtx.moveTo(startPos.x, startPos.y);
+                    drawCtx.fillStyle = currentColor;
+                    drawCtx.arc(startPos.x, startPos.y, currentSize / 2, 0, Math.PI * 2);
+                    drawCtx.fill();
+                    drawCtx.beginPath();
+                    drawCtx.moveTo(startPos.x, startPos.y);
+                } else if (currentMode === 'lasso') {
+                    lassoPath = [{ x: startPos.x, y: startPos.y }];
+                }
             }
         });
 
         drawCanvas.addEventListener('pointermove', (e) => {
-            if (!isDrawing && !touchPanMode) return;
             e.preventDefault(); 
             
-            if (e.pointerType === 'touch') {
-                if (activeTouches.has(e.pointerId)) {
-                    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+            // 1. ตรวจจับการลากนิ้วเพื่อเลื่อนหรือซูม
+            if (e.pointerType === 'touch' && activeTouches.has(e.pointerId)) {
+                activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                
+                if (isPinching && activeTouches.size === 2) {
+                    // ถ่างนิ้วซูมผ่าน CSS เพื่อความลื่นไหล
+                    const touches = Array.from(activeTouches.values());
+                    const currentDistance = Math.hypot(touches[0].x - touches[1].x, touches[0].y - touches[1].y);
+                    const zoomFactor = currentDistance / initialPinchDistance;
                     
-                    if (touchPanMode && activeTouches.size === 2) {
-                        const touches = Array.from(activeTouches.values());
-                        const currentPanPoint = {
-                            x: (touches[0].x + touches[1].x) / 2,
-                            y: (touches[0].y + touches[1].y) / 2
-                        };
-                        
-                        const dx = currentPanPoint.x - lastPanPoint.x;
-                        const dy = currentPanPoint.y - lastPanPoint.y;
-                        
-                        const scrollContainer = document.querySelector('.main-content');
-                        scrollContainer.scrollLeft -= dx;
-                        scrollContainer.scrollTop -= dy;
-                        
-                        lastPanPoint = currentPanPoint;
-                    }
+                    container.style.transform = `scale(${zoomFactor})`;
+                    // คำนวณจุดกึ่งกลางระหว่าง 2 นิ้วเพื่อยึดจุดซูม
+                    const centerX = (touches[0].x + touches[1].x) / 2;
+                    const centerY = (touches[0].y + touches[1].y) / 2;
+                    const rect = scrollArea.getBoundingClientRect();
+                    container.style.transformOrigin = `${centerX - rect.left + scrollArea.scrollLeft}px ${centerY - rect.top + scrollArea.scrollTop}px`;
+                    return;
                 }
-                if (touchPanMode) return; 
+                
+                if (touchPanMode && activeTouches.size === 1) {
+                    // ลากนิ้ว 1 นิ้วเพื่อเลื่อนหน้ากระดาษ
+                    const touch = activeTouches.get(e.pointerId);
+                    const dx = touch.x - lastPanPoint.x;
+                    const dy = touch.y - lastPanPoint.y;
+                    
+                    scrollArea.scrollLeft -= dx;
+                    scrollArea.scrollTop -= dy;
+                    
+                    lastPanPoint = { x: touch.x, y: touch.y };
+                    return;
+                }
             }
 
+            // 2. การวาดด้วยปากกา
             if (!isDrawing) return;
-            
-            const currentPos = getPointerPos(drawCanvas, e);
-            
-            if (currentMode === 'pen') {
-                drawCtx.strokeStyle = currentColor;
-                drawCtx.lineWidth = currentSize;
-                drawCtx.lineTo(currentPos.x, currentPos.y);
-                drawCtx.stroke();
-                currentStroke.points.push({ x: currentPos.x, y: currentPos.y });
+            if (e.pointerType === 'pen' || e.pointerType === 'mouse') {
+                const currentPos = getPointerPos(drawCanvas, e);
                 
-            } else if (currentMode === 'ruler') {
-                redrawAllStrokes(currentPageNum);
-                drawCtx.beginPath();
-                drawCtx.strokeStyle = currentColor;
-                drawCtx.lineWidth = currentSize;
-                drawCtx.moveTo(startPos.x, startPos.y);
-                drawCtx.lineTo(currentPos.x, currentPos.y);
-                drawCtx.stroke();
-                
-            } else if (currentMode === 'lasso') {
-                lassoPath.push({ x: currentPos.x, y: currentPos.y });
-                redrawAllStrokes(currentPageNum);
+                if (currentMode === 'pen') {
+                    drawCtx.strokeStyle = currentColor;
+                    drawCtx.lineWidth = currentSize;
+                    drawCtx.lineTo(currentPos.x, currentPos.y);
+                    drawCtx.stroke();
+                    currentStroke.points.push({ x: currentPos.x, y: currentPos.y });
+                } else if (currentMode === 'ruler') {
+                    redrawAllStrokes(currentPageNum);
+                    drawCtx.beginPath();
+                    drawCtx.strokeStyle = currentColor;
+                    drawCtx.lineWidth = currentSize;
+                    drawCtx.moveTo(startPos.x, startPos.y);
+                    drawCtx.lineTo(currentPos.x, currentPos.y);
+                    drawCtx.stroke();
+                } else if (currentMode === 'lasso') {
+                    lassoPath.push({ x: currentPos.x, y: currentPos.y });
+                    redrawAllStrokes(currentPageNum);
+                }
             }
         });
 
         function saveStroke(e) {
+            // ยกเลิกการใช้นิ้ว
             if (e.pointerType === 'touch') {
                 activeTouches.delete(e.pointerId);
-                if (activeTouches.size < 2) {
+                
+                // หากกำลังซูมอยู่และปล่อยนิ้ว ให้คำนวณ Scale ล่าสุดและเรนเดอร์ PDF ใหม่ให้ชัดเจน
+                if (isPinching && activeTouches.size < 2) {
+                    isPinching = false;
+                    const transformStr = container.style.transform;
+                    
+                    if (transformStr.includes('scale')) {
+                        const match = transformStr.match(/scale\(([^)]+)\)/);
+                        if (match && match[1]) {
+                            const finalZoomFactor = parseFloat(match[1]);
+                            currentScale = pinchStartScale * finalZoomFactor;
+                            
+                            // จำกัดขนาดการซูม
+                            if (currentScale < 0.5) currentScale = 0.5;
+                            if (currentScale > 5.0) currentScale = 5.0;
+                            
+                            zoomInfo.textContent = Math.round(currentScale * 100) + '%';
+                            container.style.transform = 'none'; // เอา CSS ออกแล้ววาดใหม่แบบคมชัด
+                            renderPage(currentPageNum);
+                        }
+                    }
+                }
+                
+                if (activeTouches.size === 0) {
                     touchPanMode = false;
                 }
                 
-                if (!isDrawing) {
-                    if (drawCanvas.hasPointerCapture(e.pointerId)) {
-                        drawCanvas.releasePointerCapture(e.pointerId);
-                    }
-                    return; 
+                if (drawCanvas.hasPointerCapture(e.pointerId)) {
+                    drawCanvas.releasePointerCapture(e.pointerId);
                 }
+                return; 
             }
             
-            if (isDrawing) {
+            // บันทึกเส้นสำหรับปากกา
+            if (isDrawing && (e.pointerType === 'pen' || e.pointerType === 'mouse')) {
                 isDrawing = false;
                 if (drawCanvas.hasPointerCapture(e.pointerId)) {
                     drawCanvas.releasePointerCapture(e.pointerId);
@@ -578,7 +639,7 @@
                 redrawAllStrokes(currentPageNum);
 
                 if (currentFileName) {
-                    localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
+                    localStorage.setItem('pdfDraftV3_' + currentFileName, JSON.stringify(allStrokes));
                 }
             }
         }
@@ -631,40 +692,18 @@
             allStrokes[currentPageNum] = []; 
             redrawAllStrokes(currentPageNum);
             if (currentFileName) {
-                localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
+                localStorage.setItem('pdfDraftV3_' + currentFileName, JSON.stringify(allStrokes));
             }
         });
 
         btnSave.addEventListener('click', () => {
-            if (!currentPdf) {
-                alert('กรุณาเปิดไฟล์ PDF ก่อนบันทึก');
-                return;
-            }
-            localStorage.setItem('pdfDraftV2_' + currentFileName, JSON.stringify(allStrokes));
-            alert('บันทึกฉบับร่างของไฟล์ "' + currentFileName + '" เรียบร้อยแล้ว');
-        });
-
-        btnLoad.addEventListener('click', () => {
-            if (!currentPdf) {
-                alert('กรุณาเปิดไฟล์ PDF ก่อนโหลดข้อมูล');
-                return;
-            }
-            const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
-            if (savedData) {
-                allStrokes = JSON.parse(savedData);
-                undoStacks = {}; 
-                redrawAllStrokes(currentPageNum);
-                alert('โหลดข้อมูลเรียบร้อยแล้ว');
-            } else {
-                alert('ไม่พบข้อมูลร่างสำหรับไฟล์นี้');
-            }
+            if (!currentPdf) return;
+            localStorage.setItem('pdfDraftV3_' + currentFileName, JSON.stringify(allStrokes));
+            alert('บันทึกฉบับร่างเรียบร้อยแล้ว');
         });
 
         btnExport.addEventListener('click', async () => {
-            if (!originalPdfBytes) {
-                alert('กรุณาเปิดไฟล์ PDF ก่อนทำการ Export');
-                return;
-            }
+            if (!originalPdfBytes) return;
 
             btnExport.textContent = 'กำลังประมวลผล...';
             btnExport.disabled = true;
@@ -680,8 +719,6 @@
                     if (strokes.length === 0) continue;
 
                     const page = pages[i];
-                    
-                    // ดึงค่า Transform Matrix จาก pdf.js เพื่อรับรู้สถานะการหมุนของหน้ากระดาษ
                     const pdfjsPage = await currentPdf.getPage(pageNum);
                     const viewport = pdfjsPage.getViewport({ scale: 1.0 });
                     const [a, b, c, d, e, f] = viewport.transform;
@@ -694,8 +731,6 @@
                         let pathStr = "";
                         for (let j = 0; j < stroke.points.length; j++) {
                             const pt = stroke.points[j];
-                            
-                            // ใช้สมการเมทริกซ์ผกผัน (Inverse Matrix) แปลงพิกัดกลับสู่พิกัดดั้งเดิม
                             const x_p = (d * (pt.x - e) - c * (pt.y - f)) / det;
                             const y_p = (a * (pt.y - f) - b * (pt.x - e)) / det;
 
