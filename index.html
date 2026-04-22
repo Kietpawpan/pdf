@@ -5,11 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>PDF Proofreading App - Auto Save</title>
     <link rel="manifest" href="manifest.json">
-    
+    <!--
     <script src="pdf.min.js"></script>
     <script src="pdf-lib.min.js"></script>
+-->
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 
-  <style>
+    <style>
         body {
             font-family: sans-serif;
             margin: 0;
@@ -25,7 +29,7 @@
             -ms-user-select: none;
             user-select: none; 
             -webkit-touch-callout: none; 
-            overflow: hidden; /* ป้องกันไม่ให้ body เลื่อน แต่ให้เลื่อนในกล่องแทน */
+            overflow: hidden;
         }
         .toolbar {
             background: white;
@@ -232,11 +236,15 @@
         let currentSize = 1; 
         
         let allStrokes = {}; 
-        let undoStacks = {}; // เก็บประวัติการวาดเพื่อทำ Undo (2 ชั้น)
+        let undoStacks = {}; 
         
         let currentStroke = null;
         let startPos = null;
         let lassoPath = [];
+
+        let activeTouches = new Map();
+        let touchPanMode = false;
+        let lastPanPoint = null;
 
         function hexToRgbObj(hex) {
             let r = 0; let g = 0; let b = 0;
@@ -260,15 +268,12 @@
             return inside;
         }
 
-        // ฟังก์ชันบันทึกสถานะก่อนการวาดใหม่ (รองรับ Undo 2 ชั้น)
         function saveStateForUndo(pageNum) {
             if (!undoStacks[pageNum]) undoStacks[pageNum] = [];
             
-            // สำเนาข้อมูลลายเส้นปัจจุบันเก็บไว้
             const currentState = JSON.parse(JSON.stringify(allStrokes[pageNum] || []));
             undoStacks[pageNum].push(currentState);
             
-            // เก็บไว้สูงสุดแค่ 2 ชั้น
             if (undoStacks[pageNum].length > 2) {
                 undoStacks[pageNum].shift(); 
             }
@@ -291,7 +296,6 @@
                     allStrokes = {}; 
                     undoStacks = {};
 
-                    // ใช้ Key ใหม่ pdfDraftV2_ เพื่อป้องกันพิกัดขัดแย้งกับเวอร์ชันเก่า
                     const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
                     if (savedData) {
                         allStrokes = JSON.parse(savedData);
@@ -331,7 +335,6 @@
                 };
                 page.render(renderContext);
                 
-                // สเกล Canvas ให้ตรงกับการซูม
                 drawCtx.scale(dpr * currentScale, dpr * currentScale);
                 drawCtx.lineCap = 'round';
                 drawCtx.lineJoin = 'round';
@@ -373,7 +376,6 @@
         btnUndo.addEventListener('click', () => {
             if (!currentPdf || !undoStacks[currentPageNum] || undoStacks[currentPageNum].length === 0) return;
             
-            // ดึงสถานะก่อนหน้าออกมา
             const previousState = undoStacks[currentPageNum].pop();
             allStrokes[currentPageNum] = previousState;
             
@@ -410,7 +412,6 @@
 
         function getPointerPos(canvas, evt) {
             const rect = canvas.getBoundingClientRect();
-            // หารด้วย currentScale เพื่อแปลงพิกัดกลับไปเป็น Scale 1.0 (ขนาดปกติ) เสมอ
             return {
                 x: (evt.clientX - rect.left) / currentScale,
                 y: (evt.clientY - rect.top) / currentScale
@@ -423,10 +424,30 @@
 
         drawCanvas.addEventListener('pointerdown', (e) => {
             if (!currentPdf) return; 
-            if (e.pointerType === 'touch') return;
             
             drawCanvas.setPointerCapture(e.pointerId);
+
+            if (e.pointerType === 'touch') {
+                activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                
+                if (activeTouches.size === 2) {
+                    touchPanMode = true;
+                    isDrawing = false; 
+                    redrawAllStrokes(currentPageNum); 
+                    
+                    const touches = Array.from(activeTouches.values());
+                    lastPanPoint = {
+                        x: (touches[0].x + touches[1].x) / 2,
+                        y: (touches[0].y + touches[1].y) / 2
+                    };
+                    return;
+                } else if (activeTouches.size > 2) {
+                    return;
+                }
+            }
+
             isDrawing = true;
+            touchPanMode = false;
             startPos = getPointerPos(drawCanvas, e);
             
             if (currentMode === 'pen') {
@@ -449,9 +470,34 @@
         });
 
         drawCanvas.addEventListener('pointermove', (e) => {
-            if (e.pointerType === 'touch') return;
-            if (!isDrawing) return;
+            if (!isDrawing && !touchPanMode) return;
             e.preventDefault(); 
+            
+            if (e.pointerType === 'touch') {
+                if (activeTouches.has(e.pointerId)) {
+                    activeTouches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+                    
+                    if (touchPanMode && activeTouches.size === 2) {
+                        const touches = Array.from(activeTouches.values());
+                        const currentPanPoint = {
+                            x: (touches[0].x + touches[1].x) / 2,
+                            y: (touches[0].y + touches[1].y) / 2
+                        };
+                        
+                        const dx = currentPanPoint.x - lastPanPoint.x;
+                        const dy = currentPanPoint.y - lastPanPoint.y;
+                        
+                        const scrollContainer = document.querySelector('.main-content');
+                        scrollContainer.scrollLeft -= dx;
+                        scrollContainer.scrollTop -= dy;
+                        
+                        lastPanPoint = currentPanPoint;
+                    }
+                }
+                if (touchPanMode) return; 
+            }
+
+            if (!isDrawing) return;
             
             const currentPos = getPointerPos(drawCanvas, e);
             
@@ -478,11 +524,26 @@
         });
 
         function saveStroke(e) {
-            if (e.pointerType === 'touch') return;
+            if (e.pointerType === 'touch') {
+                activeTouches.delete(e.pointerId);
+                if (activeTouches.size < 2) {
+                    touchPanMode = false;
+                }
+                
+                if (!isDrawing) {
+                    if (drawCanvas.hasPointerCapture(e.pointerId)) {
+                        drawCanvas.releasePointerCapture(e.pointerId);
+                    }
+                    return; 
+                }
+            }
             
             if (isDrawing) {
                 isDrawing = false;
-                drawCanvas.releasePointerCapture(e.pointerId);
+                if (drawCanvas.hasPointerCapture(e.pointerId)) {
+                    drawCanvas.releasePointerCapture(e.pointerId);
+                }
+                
                 const currentPos = getPointerPos(drawCanvas, e);
                 
                 if (!allStrokes[currentPageNum]) {
@@ -526,7 +587,6 @@
         drawCanvas.addEventListener('pointercancel', saveStroke);
 
         function redrawAllStrokes(pageNum) {
-            // ป้องกันการเคลียร์พื้นที่ผิดขนาดเนื่องจากมีระบบ Scale
             const clearWidth = drawCanvas.width / (window.devicePixelRatio || 1) / currentScale;
             const clearHeight = drawCanvas.height / (window.devicePixelRatio || 1) / currentScale;
             drawCtx.clearRect(0, 0, clearWidth, clearHeight);
@@ -592,7 +652,7 @@
             const savedData = localStorage.getItem('pdfDraftV2_' + currentFileName);
             if (savedData) {
                 allStrokes = JSON.parse(savedData);
-                undoStacks = {}; // รีเซ็ตประวัติ Undo เมื่อโหลดใหม่
+                undoStacks = {}; 
                 redrawAllStrokes(currentPageNum);
                 alert('โหลดข้อมูลเรียบร้อยแล้ว');
             } else {
@@ -620,32 +680,47 @@
                     if (strokes.length === 0) continue;
 
                     const page = pages[i];
-                    const pageHeight = page.getHeight();
                     
-                    // เนื่องจากพิกัดถูกจัดเก็บในรูปแบบ Scale 1.0 (ขนาดปกติของ PDF) แล้ว จึงตั้งค่า scale เป็น 1 ได้เลย
-                    const scaleFactor = 1.0; 
+                    // ดึงค่า Transform Matrix จาก pdf.js เพื่อรับรู้สถานะการหมุนของหน้ากระดาษ
+                    const pdfjsPage = await currentPdf.getPage(pageNum);
+                    const viewport = pdfjsPage.getViewport({ scale: 1.0 });
+                    const [a, b, c, d, e, f] = viewport.transform;
+                    const det = a * d - b * c;
 
                     strokes.forEach(stroke => {
-                        const c = hexToRgbObj(stroke.color);
-                        const pdfColor = rgb(c.r, c.g, c.b);
+                        const colorObj = hexToRgbObj(stroke.color);
+                        const pdfColor = rgb(colorObj.r, colorObj.g, colorObj.b);
 
-                        let pathStr = `M ${stroke.points[0].x} ${stroke.points[0].y}`;
-                        for (let j = 1; j < stroke.points.length; j++) {
-                            pathStr += ` L ${stroke.points[j].x} ${stroke.points[j].y}`;
+                        let pathStr = "";
+                        for (let j = 0; j < stroke.points.length; j++) {
+                            const pt = stroke.points[j];
+                            
+                            // ใช้สมการเมทริกซ์ผกผัน (Inverse Matrix) แปลงพิกัดกลับสู่พิกัดดั้งเดิม
+                            const x_p = (d * (pt.x - e) - c * (pt.y - f)) / det;
+                            const y_p = (a * (pt.y - f) - b * (pt.x - e)) / det;
+
+                            if (j === 0) {
+                                pathStr += `M ${x_p} ${-y_p}`;
+                            } else {
+                                pathStr += ` L ${x_p} ${-y_p}`;
+                            }
                         }
 
                         if (stroke.points.length === 1) {
-                            pathStr += ` L ${stroke.points[0].x + 0.1} ${stroke.points[0].y}`;
+                            const pt = stroke.points[0];
+                            const x_p = (d * (pt.x + 0.1 - e) - c * (pt.y - f)) / det;
+                            const y_p = (a * (pt.y - f) - b * (pt.x + 0.1 - e)) / det;
+                            pathStr += ` L ${x_p} ${-y_p}`;
                         }
 
                         page.drawSvgPath(pathStr, {
                             x: 0,
-                            y: pageHeight, 
+                            y: 0, 
                             borderColor: pdfColor,
                             borderWidth: stroke.size, 
                             borderLineCap: LineCapStyle.Round,
                             borderLineJoin: LineJoinStyle.Round,
-                            scale: scaleFactor
+                            scale: 1.0
                         });
                     });
                 }
@@ -654,13 +729,13 @@
                 const blob = new Blob([pdfBytes], { type: 'application/pdf' });
                 const url = URL.createObjectURL(blob);
                 
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = currentFileName.replace('.pdf', '') + '_proofread.pdf'; 
-                document.body.appendChild(a);
-                a.click();
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = currentFileName.replace('.pdf', '') + '_proofread.pdf'; 
+                document.body.appendChild(anchor);
+                anchor.click();
                 
-                document.body.removeChild(a);
+                document.body.removeChild(anchor);
                 URL.revokeObjectURL(url);
                 
             } catch (error) {
